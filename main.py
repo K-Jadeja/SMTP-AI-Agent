@@ -1,7 +1,9 @@
+import json
 import os
+import random
 import smtplib
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 from dotenv import load_dotenv
 from todoist_api_python.api import TodoistAPI
@@ -20,7 +22,7 @@ def load_environment_variables():
     load_dotenv(env_file_path)
 
 # Async API Call for news
-async def fetch_news_async(news_api_key):
+async def fetch_news_async(news_api_key, categories="general"):
     """Fetch news asynchronously using aiohttp."""
     async with ClientSession() as session:
         try:
@@ -31,6 +33,7 @@ async def fetch_news_async(news_api_key):
                 "sort": "published_desc",
                 "date": current_date,
                 "limit": 3,
+                "categories": categories
             }
             async with session.get("http://api.mediastack.com/v1/news", params=params) as response:
                 news_items = await response.json()
@@ -62,33 +65,30 @@ async def fetch_weather_async(api_key, city_name, country_code):
 
 # Synchronous task fetching
 def get_tasks(todoist_api_key):
-    """Fetch tasks using Todoist API."""
+    """Fetch tasks using Todoist API and return as list of dictionaries."""
     try:
         api = TodoistAPI(todoist_api_key)
         tasks = api.get_tasks()
-        if tasks:
-            return "Here are your open tasks: " + ", ".join(task.content for task in tasks)
-        return "No open tasks."
+        return [task.to_dict() for task in tasks]
     except Exception as e:
         logging.error(f"Error fetching tasks: {e}")
-        return "Could not fetch tasks."
+        return []
 
 # Async task for fetching news and weather concurrently
 async def fetch_updates(news_api_key, weather_api_key, city, country):
-    news = await fetch_news_async(news_api_key)
+    news = await fetch_news_async(news_api_key, categories="technology,science,health")
     weather = await fetch_weather_async(weather_api_key, city, country)
     return news, weather
 
 # Send email
 def send_email(sender, recipient, subject, news, weather, tasks, smtp_server, smtp_port, password):
-    """Send email with improved HTML formatting."""
+    """Send email with creatively formatted HTML and task display."""
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
         msg["From"] = sender
         msg["To"] = recipient
 
-        # Create news content
         news_content = ""
         for item in news.split("\n\n"):
             title = item.split("Title: ")[1].split("\n")[0] if "Title: " in item else "No title"
@@ -101,7 +101,58 @@ def send_email(sender, recipient, subject, news, weather, tasks, smtp_server, sm
             </div>
             """
 
-        # HTML template (inline to avoid file reading issues)
+        # Filter and categorize tasks
+        today = datetime.now().date()
+        tomorrow = today + timedelta(days=1)
+        day_after_tomorrow = today + timedelta(days=2)
+
+        today_tasks = []
+        tomorrow_tasks = []
+
+        for task in tasks:
+            due_date = task['due']['date'] if task['due'] else None
+            if due_date:
+                due_date = datetime.strptime(due_date, "%Y-%m-%d").date()
+                if due_date < today:
+                    continue  # Skip past tasks
+                elif due_date > day_after_tomorrow:
+                    continue  # Skip tasks due after tomorrow
+                elif due_date == today:
+                    today_tasks.append(task)
+                elif due_date == tomorrow:
+                    tomorrow_tasks.append(task)
+
+        # Function to get a random task emoji
+        def get_task_emoji():
+            emojis = ["🚀", "💻", "📚", "🎨", "🔧", "📝", "🔬", "🏋️", "🧘", "🎵"]
+            return random.choice(emojis)
+
+        # Create tasks content
+        tasks_content = ""
+        if today_tasks:
+            tasks_content += f"""
+            <div class="task-group today">
+                <h3>Today's Mission</h3>
+                <div class="progress-bar" style="--progress: {len(today_tasks) * 10}%; padding-left: 20px;">
+                    <span>{len(today_tasks)} task{'s' if len(today_tasks) > 1 else ''}</span>
+                </div>
+                <ul>
+            """
+            for task in today_tasks:
+                tasks_content += f"<li>{get_task_emoji()} {task['content']}</li>"
+            tasks_content += "</ul></div>"
+
+        if tomorrow_tasks:
+            tasks_content += f"""
+            <div class="task-group tomorrow">
+                <h3>On the Horizon</h3>
+                <ul>
+            """
+            for task in tomorrow_tasks:
+                tasks_content += f"<li>{get_task_emoji()} {task['content']}</li>"
+            tasks_content += "</ul></div>"
+
+        # HTML template with updated styling
         html_template = """
         <!DOCTYPE html>
         <html lang="en">
@@ -111,29 +162,39 @@ def send_email(sender, recipient, subject, news, weather, tasks, smtp_server, sm
             <title>Your Daily Update</title>
             <style>
                 body {{
-                    font-family: Arial, sans-serif;
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
                     line-height: 1.6;
                     color: #333;
                     max-width: 600px;
                     margin: 0 auto;
                     padding: 20px;
+                    background-color: #f5f5f5;
                 }}
                 h1 {{
                     color: #2c3e50;
                     border-bottom: 2px solid #3498db;
                     padding-bottom: 10px;
+                    text-align: center;
                 }}
                 h2 {{
                     color: #2980b9;
+                    text-align: center;
+                }}
+                h3 {{
+                    color: #34495e;
+                    margin-bottom: 10px;
                 }}
                 .section {{
-                    background-color: #f9f9f9;
-                    border-radius: 5px;
-                    padding: 15px;
+                    background-color: #ffffff;
+                    border-radius: 10px;
+                    padding: 20px;
                     margin-bottom: 20px;
+                    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
                 }}
                 .news-item {{
                     margin-bottom: 15px;
+                    border-left: 3px solid #3498db;
+                    padding-left: 10px;
                 }}
                 .news-item h3 {{
                     margin-bottom: 5px;
@@ -148,24 +209,68 @@ def send_email(sender, recipient, subject, news, weather, tasks, smtp_server, sm
                 .news-item a:hover {{
                     text-decoration: underline;
                 }}
+                .task-group {{
+                    margin-bottom: 20px;
+                    padding: 15px;
+                    border-radius: 5px;
+                }}
+                .today {{
+                    background-color: #e8f4f8;
+                }}
+                .tomorrow {{
+                    background-color: #fff4e6;
+                }}
+                ul {{
+                    list-style-type: none;
+                    padding-left: 0;
+                }}
+                li {{
+                    margin-bottom: 10px;
+                    font-size: 16px;
+                }}
+                .progress-bar {{
+                    background-color: #e0e0e0;
+                    border-radius: 10px;
+                    height: 20px;
+                    width: 100%;
+                    margin-bottom: 15px;
+                    position: relative;
+                    overflow: hidden;
+                }}
+                .progress-bar::before {{
+                    content: '';
+                    display: block;
+                    height: 100%;
+                    width: var(--progress);
+                    background-color: #4caf50;
+                    transition: width 0.5s ease-in-out;
+                }}
+                .progress-bar span {{
+                    position: absolute;
+                    top: 50%;
+                    left: 50%;
+                    transform: translate(-50%, -50%);
+                    color: #333;
+                    font-weight: bold;
+                }}
             </style>
         </head>
         <body>
-            <h1>Good morning! Here's your daily update 🚀</h1>
+            <h1>🌟 Your Daily Launchpad 🚀</h1>
             
             <div class="section">
-                <h2>📰 News</h2>
+                <h2>📰 News Flash</h2>
                 {news_content}
             </div>
             
             <div class="section">
-                <h2>🌤️ Weather</h2>
+                <h2>🌤️ Weather Update</h2>
                 <p>{weather_content}</p>
             </div>
             
             <div class="section">
-                <h2>📝 To-Do List</h2>
-                <p>{tasks_content}</p>
+                <h2>📝 Mission Control</h2>
+                {tasks_content}
             </div>
         </body>
         </html>
@@ -175,7 +280,7 @@ def send_email(sender, recipient, subject, news, weather, tasks, smtp_server, sm
         html_content = html_template.format(
             news_content=news_content,
             weather_content=weather,
-            tasks_content=tasks
+            tasks_content=tasks_content
         )
 
         # Set the email content
