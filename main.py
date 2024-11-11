@@ -46,23 +46,91 @@ async def fetch_news_async(news_api_key, categories="general"):
         except Exception as e:
             logging.error(f"Error fetching news: {e}")
             return "Error fetching news."
+        
+# Weather API
+async def fetch_weather_from_weatherapi(session, api_key, city_name):
+    """Fetch weather from WeatherAPI.com with enhanced formatting."""
+    try:
+        api_url = f"http://api.weatherapi.com/v1/current.json?key={api_key}&q={city_name}&aqi=no"
+        async with session.get(api_url) as response:
+            if response.status != 200:
+                raise Exception(f"WeatherAPI.com returned status {response.status}")
+            
+            weather_data = await response.json()
+            if weather_data and "current" in weather_data:
+                current = weather_data["current"]
+                location = weather_data["location"]
+                return {
+                    "source": "WeatherAPI.com",
+                    "location": {
+                        "city": location['name'],
+                        "country": location['country']
+                    },
+                    "current": {
+                        "temp_c": current['temp_c'],
+                        "condition": current['condition']['text'],
+                        "humidity": current['humidity'],
+                        "wind_kph": current['wind_kph'],
+                        "feels_like": current['feelslike_c'],
+                        "last_updated": current['last_updated']
+                    }
+                }
+            raise Exception("Invalid response format from WeatherAPI.com")
+    except Exception as e:
+        logging.error(f"WeatherAPI.com error: {e}")
+        return None
 
-# Async API Call for weather
-async def fetch_weather_async(api_key, city_name, country_code):
-    """Fetch weather asynchronously using aiohttp."""
+async def fetch_weather_from_weatherbit(session, api_key, city_name, country_code):
+    """Fetch weather from Weatherbit (fallback) with enhanced formatting."""
+    try:
+        api_url = f"https://api.weatherbit.io/v2.0/current?city={city_name}&country={country_code}&key={api_key}"
+        async with session.get(api_url) as response:
+            if response.status != 200:
+                raise Exception(f"Weatherbit returned status {response.status}")
+            
+            weather_data = await response.json()
+            if weather_data and "data" in weather_data and weather_data["data"]:
+                data = weather_data["data"][0]
+                return {
+                    "source": "Weatherbit",
+                    "location": {
+                        "city": data['city_name'],
+                        "country": data['country_code']
+                    },
+                    "current": {
+                        "temp_c": data['temp'],
+                        "condition": data['weather']['description'],
+                        "humidity": data['rh'],
+                        "wind_kph": data['wind_spd'] * 3.6,  # Convert m/s to kph
+                        "feels_like": data['app_temp'],
+                        "last_updated": data['ob_time']
+                    }
+                }
+            raise Exception("Invalid response format from Weatherbit")
+    except Exception as e:
+        logging.error(f"Weatherbit error: {e}")
+        return None
+    
+#Function for fault tolerance for the APIs
+async def fetch_weather_async(weatherapi_key, weatherbit_key, city_name, country_code):
+    """Fetch weather with fault tolerance and enhanced formatting."""
     async with ClientSession() as session:
-        try:
-            api_url = f"https://api.weatherbit.io/v2.0/current?city={city_name}&country={country_code}&key={api_key}"
-            async with session.get(api_url) as response:
-                weather_data = await response.json()
-                if weather_data and "data" in weather_data:
-                    data = weather_data["data"][0]
-                    return f"Weather in {data['city_name']}, {data['country_code']}: {data['temp']}°C, {data['weather']['description']}."
-                return "No weather information."
-        except Exception as e:
-            logging.error(f"Error fetching weather: {e}")
-            return "Weather information is unavailable."
+        weather_result = await fetch_weather_from_weatherapi(session, weatherapi_key, city_name)
+        if weather_result:
+            logging.info("Weather fetched successfully from WeatherAPI.com")
+            return weather_result
 
+        logging.warning("WeatherAPI.com failed, trying Weatherbit...")
+        weather_result = await fetch_weather_from_weatherbit(session, weatherbit_key, city_name, country_code)
+        if weather_result:
+            logging.info("Weather fetched successfully from Weatherbit")
+            return weather_result
+
+        return {
+            "error": True,
+            "message": "Weather information is unavailable from all sources."
+        }
+        
 # Synchronous task fetching
 def get_tasks(todoist_api_key):
     """Fetch tasks using Todoist API and return as list of dictionaries."""
@@ -75,12 +143,168 @@ def get_tasks(todoist_api_key):
         return []
 
 # Async task for fetching news and weather concurrently
-async def fetch_updates(news_api_key, weather_api_key, city, country):
+async def fetch_updates(news_api_key, weatherapi_key, weatherbit_key, city, country):
     news = await fetch_news_async(news_api_key, categories="technology,science,health")
-    weather = await fetch_weather_async(weather_api_key, city, country)
+    weather = await fetch_weather_async(weatherapi_key, weatherbit_key, city, country)
     return news, weather
 
-# Send email
+def format_weather_html(weather_data):
+    """Format weather data into HTML."""
+    if "error" in weather_data:
+        return f"""
+        <div class="weather-error">
+            <p>{weather_data['message']}</p>
+        </div>
+        """
+    
+    # Get weather icon based on condition
+    def get_weather_icon(condition):
+        condition = condition.lower()
+        if "rain" in condition:
+            return "🌧️"
+        elif "cloud" in condition:
+            return "☁️"
+        elif "snow" in condition:
+            return "❄️"
+        elif "clear" in condition or "sunny" in condition:
+            return "☀️"
+        elif "thunder" in condition or "storm" in condition:
+            return "⛈️"
+        elif "mist" in condition or "fog" in condition:
+            return "🌫️"
+        return "🌤️"
+
+    weather_icon = get_weather_icon(weather_data['current']['condition'])
+    
+    return f"""
+    <div class="weather-container">
+        <div class="weather-header">
+            <h3>{weather_data['location']['city']}, {weather_data['location']['country']}</h3>
+            <span class="weather-source">Source: {weather_data['source']}</span>
+        </div>
+        
+        <div class="weather-main">
+            <div class="weather-temp">
+                <span class="temp-big">{weather_data['current']['temp_c']}°C</span>
+                <span class="condition">{weather_icon} {weather_data['current']['condition']}</span>
+            </div>
+            
+            <div class="weather-details">
+                <div class="weather-detail-item">
+                    <span class="detail-label">Feels Like</span>
+                    <span class="detail-value">{weather_data['current']['feels_like']}°C</span>
+                </div>
+                <div class="weather-detail-item">
+                    <span class="detail-label">Humidity</span>
+                    <span class="detail-value">{weather_data['current']['humidity']}%</span>
+                </div>
+                <div class="weather-detail-item">
+                    <span class="detail-label">Wind Speed</span>
+                    <span class="detail-value">{round(weather_data['current']['wind_kph'], 1)} km/h</span>
+                </div>
+            </div>
+        </div>
+        
+        <div class="weather-footer">
+            Last updated: {weather_data['current']['last_updated']}
+        </div>
+    </div>
+    """
+
+# Add these styles to your HTML template's <style> section:
+weather_styles = """
+    .weather-container {
+        background: linear-gradient(135deg, #6dd5fa, #2980b9);
+        color: white;
+        padding: 20px;
+        border-radius: 15px;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+    }
+
+    .weather-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+    }
+
+    .weather-header h3 {
+        color: white;
+        margin: 0;
+        font-size: 1.5em;
+    }
+
+    .weather-source {
+        font-size: 0.8em;
+        opacity: 0.8;
+    }
+
+    .weather-main {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+    }
+
+    .weather-temp {
+        text-align: center;
+    }
+
+    .temp-big {
+        font-size: 3em;
+        font-weight: bold;
+        display: block;
+    }
+
+    .condition {
+        font-size: 1.2em;
+        display: block;
+        margin-top: 5px;
+    }
+
+    .weather-details {
+        display: grid;
+        grid-template-columns: repeat(1, 1fr);
+        gap: 10px;
+    }
+
+    .weather-detail-item {
+        background: rgba(255, 255, 255, 0.1);
+        padding: 10px;
+        border-radius: 8px;
+        text-align: center;
+    }
+
+    .detail-label {
+        display: block;
+        font-size: 0.9em;
+        opacity: 0.9;
+    }
+
+    .detail-value {
+        display: block;
+        font-size: 1.1em;
+        font-weight: bold;
+        margin-top: 5px;
+    }
+
+    .weather-footer {
+        text-align: right;
+        font-size: 0.8em;
+        opacity: 0.8;
+        margin-top: 10px;
+    }
+
+    .weather-error {
+        background: #ff6b6b;
+        color: white;
+        padding: 15px;
+        border-radius: 8px;
+        text-align: center;
+    }
+"""
+
+# Update your send_email function to use the new weather formatting:
 def send_email(sender, recipient, subject, news, weather, tasks, smtp_server, smtp_port, password):
     """Send email with creatively formatted HTML and task display."""
     try:
@@ -153,14 +377,14 @@ def send_email(sender, recipient, subject, news, weather, tasks, smtp_server, sm
             tasks_content += "</ul></div>"
 
         # HTML template with updated styling
-        html_template = """
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Your Daily Update</title>
-            <style>
+            html_template = """
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Your Daily Update</title>
+                <style>
                 body {{
                     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
                     line-height: 1.6;
@@ -253,6 +477,7 @@ def send_email(sender, recipient, subject, news, weather, tasks, smtp_server, sm
                     color: #333;
                     font-weight: bold;
                 }}
+                {weather_styles}
             </style>
         </head>
         <body>
@@ -265,7 +490,7 @@ def send_email(sender, recipient, subject, news, weather, tasks, smtp_server, sm
             
             <div class="section">
                 <h2>🌤️ Weather Update</h2>
-                <p>{weather_content}</p>
+                {weather_content}
             </div>
             
             <div class="section">
@@ -279,16 +504,16 @@ def send_email(sender, recipient, subject, news, weather, tasks, smtp_server, sm
         # Format the HTML content
         html_content = html_template.format(
             news_content=news_content,
-            weather_content=weather,
-            tasks_content=tasks_content
+            weather_content=format_weather_html(weather),
+            tasks_content=tasks_content,
+            weather_styles=weather_styles
         )
-
         # Set the email content
         text_part = MIMEText("Your daily update is ready. Please view this email in HTML format.", "plain")
         html_part = MIMEText(html_content, "html")
 
-        msg.attach(text_part)
-        msg.attach(html_part)
+        msg.attach(text_part)  #notification part
+        msg.attach(html_part)  #actuall email
 
         with smtplib.SMTP(smtp_server, smtp_port) as smtp:
             smtp.starttls()
@@ -302,31 +527,29 @@ def send_email(sender, recipient, subject, news, weather, tasks, smtp_server, sm
         logging.error(f"Unexpected error: {e}")
         return f"An unexpected error occurred: {e}"
 
-# Main function for running everything
 def main():
     load_environment_variables()
 
     news_api_key = os.getenv("NEWS_API_KEY")
     todoist_api_key = os.getenv("TODOIST_API_KEY")
-    weather_api_key = os.getenv("WEATHER_API_KEY")
+    weatherapi_key = os.getenv("WEATHERAPI_KEY")  # Primary weather API key
+    weatherbit_key = os.getenv("WEATHERBIT_KEY")  # Fallback weather API key
     sender = os.getenv("EMAIL_SENDER")
     password = os.getenv("EMAIL_PASSWORD")
-    recipient = sender  # Sending the email to yourself
+    recipient = sender  # Sending the email to myself
 
     # Get tasks synchronously
     tasks = get_tasks(todoist_api_key)
 
-    # Run news and weather fetch asynchronously
+    # Run news and weather fetch asynchronously with fault tolerance for weather
     city, country = "Chennai", "IN"
-    news, weather = asyncio.run(fetch_updates(news_api_key, weather_api_key, city, country))
-
-    # Construct email body
-    message_body = (
-        f"Good morning! Here's your update:\n\n"
-        f"---- NEWS ----\n{news}\n\n"
-        f"---- WEATHER ----\n{weather}\n\n"
-        f"---- TO-DO LIST ----\n{tasks}\n"
-    )
+    news, weather = asyncio.run(fetch_updates(
+        news_api_key, 
+        weatherapi_key,
+        weatherbit_key, 
+        city, 
+        country
+    ))
 
     # Send the email
     send_status = send_email(
@@ -341,7 +564,6 @@ def main():
         password=password,
     )
     print(send_status)
-
 
 if __name__ == "__main__":
     main()
